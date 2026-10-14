@@ -1,0 +1,371 @@
+# ============================================================
+# IDS 570 Data Exploration
+# Decomposition as a formal technique in Latin American women's
+# fiction: Bombal, Castellanos, Garro, Somers (novels in Spanish)
+# ============================================================
+
+# ---- 0. Setup ------------------------------------------------
+# install.packages(c("tidyverse", "tidytext", "quanteda",
+#                    "quanteda.textstats", "udpipe", "readxl", "ggrepel"))
+library(tidyverse)
+library(tidytext)
+library(quanteda)
+library(quanteda.textstats)
+library(udpipe)
+library(readxl)
+library(ggrepel)
+
+
+# ---- 1. Load and clean texts (Step 0) ----------
+rd <- \(pat) {
+  f <- list.files("texts", pattern = pat, full.names = TRUE)
+  stopifnot(length(f) == 1)
+  read_file(f, locale = locale(encoding = "UTF-8")) |>
+    str_replace_all("\r\n", "\n")
+}
+
+bombal <- rd("Bombal")   # trimmed by hand to La amortajada
+
+castel <- rd("Castellanos")
+castel <- str_sub(castel, str_locate(castel, fixed("—…Y entonces, coléricos"))[1, "start"]) |>
+  str_remove("(?s)Segunda Parte.*?Esto es lo que se recuerda de aquellos días:") |>
+  str_remove("(?s)Tercera Parte.*?Anales de los xahil")
+
+garro <- rd("Garro")
+garro <- str_sub(garro, str_locate(garro, fixed("Aquí estoy, sentado sobre esta piedra aparente"))[1, "start"]) |>
+  str_remove_all("(?m)^\\s*(PRIMERA|SEGUNDA) PARTE\\s*$") |>
+  str_remove_all("(?m)^\\s*\\*( \\*)+\\s*$")
+
+somers <- rd("Somers") |> str_remove_all("\\[\\d\\]")   # footnote markers
+
+strip_roman <- \(x) str_remove_all(x, "(?m)^\\s*[IVXL]+\\s*$")   # chapter numerals
+castel <- strip_roman(castel)
+garro  <- strip_roman(garro)
+
+txts <- list(BOM = bombal, CAS = castel, GAR = garro, SOM = somers)
+
+
+# ---- 2. Corpus: 4 novels x 5 equal-token parts = 20 documents -
+split_parts <- function(text, n = 5) {
+  w <- str_split(str_squish(text), " ")[[1]]
+  g <- cut(seq_along(w), n, labels = FALSE)
+  map_chr(1:n, \(i) str_c(w[g == i], collapse = " "))
+}
+
+meta <- tribble(
+  ~code, ~author,       ~book,
+  "BOM", "Bombal",      "La amortajada",
+  "CAS", "Castellanos", "Balún Canán",
+  "GAR", "Garro",       "Los recuerdos del porvenir",
+  "SOM", "Somers",      "La mujer desnuda"
+)
+
+corpus_tbl <- meta |>
+  mutate(text = map(code, \(c) split_parts(txts[[c]])), part = list(1:5)) |>
+  unnest(c(text, part)) |>
+  mutate(doc_id        = str_c(code, part, sep = "_"),
+         n_tokens      = str_count(text, "\\S+"),
+         text_original = text,                                         # keep original (Week 3)
+         text_clean    = str_replace_all(text_original, "\\s+", " "))  # collapse whitespace
+
+corpus_tbl |> select(doc_id, author, part, n_tokens)
+
+write_csv(corpus_tbl |> select(doc_id, author, book, part, n_tokens),
+          "data/corpus_summary.csv")
+
+# ---- 3. Tokens and stopwords ------------------
+texts <- setNames(corpus_tbl$text_clean, corpus_tbl$doc_id)
+corp  <- corpus(texts)
+
+toks <- tokens(corp,
+               remove_punct   = TRUE,
+               remove_numbers = TRUE,
+               remove_symbols = TRUE)
+toks <- tokens_tolower(toks)
+
+# custom stopwords = character and place names (as Week 2's custom_stopwords)
+custom_stop <- c(
+  # Bombal
+  "ana", "maría", "antonio", "ricardo", "fernando", "alicia", "zoila", "fred",
+  "alberto", "anita", "griselda", "carlos", "gonzalo", "inés", "beatriz",
+  # Castellanos
+  "ernesto", "matilde", "zoraida", "césar", "mario", "felipe", "romelia",
+  "francisca", "chactajal", "comitán", "amalia", "jaime", "pastora", "silvina",
+  "palo", "ocosingo", "tuxtla", "utrilla", "amantina", "nati", "david", "juana",
+  "vicenta", "rosalía", "mazariegos", "catashaná", "conrado", "tapachula",
+  "míster", "peshpen", "argüello", "guatemala",
+  # Garro
+  "isabel", "nicolás", "juan", "julia", "rosas", "francisco", "ixtepec", "martín",
+  "dorotea", "hurtado", "corona", "justo", "joaquín", "félix", "elvira", "conchita",
+  "lola", "rodolfo", "rodolfito", "cruz", "flores", "luchi", "pepe", "carmen",
+  "ramón", "gregoria", "damián", "pardiñas", "beltrán", "roque", "arrieta",
+  "abacuc", "antonia", "luisa", "rafaela", "rosa", "illescas", "segovia", "tomás",
+  "cariño", "goríbar", "moncada", "cocula", "tetela", "andrade", "álvarez",
+  "ignacio", "sebastián", "urquizo", "fausto", "taconcitos", "blandina",
+  "martínez", "pando", "meléndez", "cástulo", "doro", "zapata",
+  # Somers
+  "rebeca", "linke", "nataniel", "eva", "friné", "grisalba", "claudina"
+) |> unique()
+
+toks_with_names <- tokens_remove(toks, pattern = stopwords("es"))         # function words only
+toks_no_names   <- tokens_remove(toks_with_names, pattern = custom_stop)  # + names
+
+# ---- 4. Approach 1: DFM and TF-IDF  ------------------
+dfm_with <- dfm(toks_with_names)
+dfm_mat  <- dfm(toks_no_names)       # main version: names removed
+
+dfm_mat
+topfeatures(dfm_mat, 25)
+
+tfidf_mat      <- as.matrix(dfm_tfidf(dfm_mat))
+tfidf_mat_with <- as.matrix(dfm_tfidf(dfm_with))
+
+top_n_terms <- function(mat, n = 12) {
+  map_dfr(rownames(mat), \(d) {
+    top <- sort(mat[d, ], decreasing = TRUE)[1:n]
+    tibble(doc_id = d, term = names(top), tfidf = unname(top))
+  })
+}
+tfidf_top_tbl      <- top_n_terms(tfidf_mat)
+tfidf_top_with_tbl <- top_n_terms(tfidf_mat_with)
+
+print_terms <- \(df) df |>
+  group_by(doc_id) |>
+  summarise(top_terms = str_c(term, collapse = ", ")) |>
+  mutate(line = str_c(doc_id, ": ", top_terms)) |>
+  pull(line) |> walk(cat, "\n")
+
+print_terms(tfidf_top_with_tbl)
+print_terms(tfidf_top_tbl)
+write_csv(tfidf_top_with_tbl, "data/tfidf_top12_with_names.csv")
+write_csv(tfidf_top_tbl,      "data/tfidf_top12_no_names.csv")
+
+# ---- 5. Approach 2: Pearson correlation -------------
+sim_cor <- textstat_simil(dfm_mat, method = "correlation", margin = "documents")
+r_mat   <- as.matrix(sim_cor) |> round(3)
+
+sim_cos <- textstat_simil(dfm_mat, method = "cosine", margin = "documents")  # sensitivity check
+
+order_ids <- corpus_tbl$doc_id
+heat_df <- as.data.frame(r_mat) |>
+  rownames_to_column("doc_i") |>
+  pivot_longer(-doc_i, names_to = "doc_j", values_to = "r") |>
+  mutate(across(c(doc_i, doc_j), \(x) factor(x, levels = order_ids)))
+
+p_heat <- ggplot(heat_df, aes(doc_i, doc_j, fill = r)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "steelblue", mid = "white", high = "firebrick", midpoint = 0) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5)) +
+  labs(x = NULL, y = NULL, fill = "Pearson r")
+p_heat
+ggsave("figures/heatmap.png", p_heat, width = 8, height = 7)
+
+pair_df <- heat_df |>
+  filter(as.integer(doc_i) < as.integer(doc_j)) |>
+  mutate(type = if_else(str_sub(doc_i, 1, 3) == str_sub(doc_j, 1, 3),
+                        "same book", "different books"))
+
+pair_df |> group_by(type) |> summarise(mean_r = mean(r), n = n())
+pair_df |> arrange(desc(r)) |> slice_head(n = 2)   # most similar
+pair_df |> arrange(r)       |> slice_head(n = 2)   # least similar
+
+pair_df |>
+  filter(type == "different books") |>
+  mutate(pos_i = as.integer(str_sub(doc_i, 5)), pos_j = as.integer(str_sub(doc_j, 5)),
+         pos_group = case_when(pos_i >= 4 & pos_j >= 4 ~ "late-late",
+                               pos_i <= 2 & pos_j <= 2 ~ "early-early",
+                               TRUE ~ "other")) |>
+  group_by(pos_group) |> summarise(mean_r = mean(r), n = n())
+
+# ---- 6. Parse all 20 parts with udpipe -
+ud_file <- "data/anno_all.rds"
+if (file.exists(ud_file)) {
+  anno_all <- readRDS(ud_file)
+} else {
+  ud_model <- udpipe_load_model(udpipe_download_model(language = "spanish-gsd")$file_model)
+  anno_all <- corpus_tbl |>
+    mutate(a = map2(text, doc_id, \(t, d) as.data.frame(udpipe_annotate(ud_model, x = t, doc_id = d)))) |>
+    pull(a) |> bind_rows()
+  saveRDS(anno_all, ud_file)
+}
+nrow(anno_all)
+count(anno_all, doc_id)
+
+# ---- 7. Approach 3: syntax (BOM_1 vs BOM_5) --
+pick <- c("BOM_1", "BOM_5")
+
+syntax_df <- anno_all |>
+  filter(doc_id %in% pick) |>
+  rename(document = doc_id) |>
+  mutate(
+    is_word = upos != "PUNCT",
+    is_clause = (upos %in% c("VERB", "AUX")) &
+      str_detect(coalesce(feats, ""), "VerbForm=Fin"),
+    is_dep_clause = dep_rel %in% c("advcl", "ccomp", "xcomp", "acl", "acl:relcl"),
+    is_coord = dep_rel %in% c("conj", "cc"),
+    is_complex_nominal = dep_rel %in% c("amod", "nmod", "compound", "appos")
+  )
+
+sentence_df <- syntax_df |>
+  filter(is_word) |>
+  group_by(document, sentence_id) |>
+  summarise(words = n(), clauses = sum(is_clause), dep_clauses = sum(is_dep_clause),
+            .groups = "drop")
+
+mls_df <- sentence_df |> group_by(document) |> summarise(MLS = mean(words), .groups = "drop")
+
+clausal_density_df <- sentence_df |> group_by(document) |>
+  summarise(sentences = n(), clauses = sum(clauses), C_per_S = clauses / sentences, .groups = "drop")
+
+subordination_df <- sentence_df |> group_by(document) |>
+  summarise(clauses = sum(clauses), dep_clauses = sum(dep_clauses), sentences = n(),
+            DC_per_C = dep_clauses / pmax(clauses, 1), DC_per_S = dep_clauses / sentences,
+            .groups = "drop")
+
+coordination_df <- syntax_df |> group_by(document) |>
+  summarise(coord_relations = sum(is_coord), clauses = sum(is_clause),
+            sentences = n_distinct(sentence_id),
+            Coord_per_C = coord_relations / pmax(clauses, 1),
+            Coord_per_S = coord_relations / sentences, .groups = "drop")
+
+nominal_df <- syntax_df |> group_by(document) |>
+  summarise(complex_nominals = sum(is_complex_nominal), clauses = sum(is_clause),
+            sentences = n_distinct(sentence_id),
+            CN_per_C = complex_nominals / pmax(clauses, 1),
+            CN_per_S = complex_nominals / sentences, .groups = "drop")
+
+all_measures <- mls_df |>
+  left_join(clausal_density_df |> select(document, C_per_S), by = "document") |>
+  left_join(subordination_df   |> select(document, DC_per_C, DC_per_S), by = "document") |>
+  left_join(coordination_df    |> select(document, Coord_per_C, Coord_per_S), by = "document") |>
+  left_join(nominal_df         |> select(document, CN_per_C, CN_per_S), by = "document")
+as.data.frame(all_measures)
+write_csv(all_measures, "data/syntax_measures.csv")
+
+# example sentences for the report: print them in FULL (not truncated)
+longest <- syntax_df |>
+  group_by(document, sentence_id) |>
+  summarise(sentence = str_c(token, collapse = " "), words = sum(is_word), .groups = "drop") |>
+  group_by(document) |> slice_max(words, n = 3, with_ties = FALSE) |> ungroup()
+walk2(longest$document, longest$sentence, \(d, s) cat(d, ":", s, "\n\n"))
+write_csv(longest, "data/longest_sentences.csv")
+
+# cheap sentence length for all 20 parts (no parser; my addition)
+mls_all <- corpus_tbl |>
+  mutate(sents = str_split(text, "(?<=[.!?…])\\s+"),
+         n_sent = map_int(sents, length),
+         MLS = map_dbl(sents, \(s) mean(str_count(s, "\\S+")))) |>
+  select(doc_id, author, part, n_sent, MLS)
+mls_all
+
+# ---- 8. Material dictionary (my addition; Week 3 lexicon logic) ----
+material_list <- list(
+  earth  = c("tierra", "barro", "lodo", "polvo", "piedra", "roca", "arena", "suelo", "fango", "peña"),
+  water  = c("agua", "lluvia", "río", "niebla", "charco", "humedad", "mar"),
+  plants = c("raíz", "árbol", "hoja", "hierba", "bosque", "madera", "tronco", "rama", "flor", "zacate"),
+  decay  = c("podrir", "pudrir", "ceniza", "gusano", "moho", "hongo", "carroña", "polilla")
+)
+material_lexicon <- unlist(material_list, use.names = FALSE)
+
+# 8a. exact-lemma density (main measure), as in Week 3's %in% lexicon
+dens_total <- anno_all |>
+  filter(upos != "PUNCT") |>
+  group_by(doc_id) |>
+  summarise(material_per_1000 = sum(lemma %in% material_lexicon) / n() * 1000)
+
+# 8b. robustness: stem-based (inflections, diminutives; proper nouns excluded)
+stems <- c(
+  "tierr", "barro", "lodo", "lodaz", "polvo", "polvar", "piedr", "roca", "arena", "suelo", "fango", "peña",
+  "agua", "lluvi", "río", "nieb", "charc", "humed", "mar$",
+  "raíz", "raice", "árbol", "hoja", "hierb", "bosqu", "mader", "tronc", "ramas?$", "flor", "zacat",
+  "podrid", "podrir", "pudr", "ceniz", "gusan", "moho", "hongo", "carroñ", "polill"
+)
+bad     <- "^(agua(nt|rd|d))"
+stem_rx <- str_c("^(", str_c(stems, collapse = "|"), ")")
+
+stem_hits <- anno_all |>
+  filter(upos != "PUNCT") |>
+  mutate(lemma_l = str_to_lower(lemma),
+         hit = str_detect(lemma_l, stem_rx) & !str_detect(lemma_l, bad) & upos != "PROPN")
+
+dens_stem <- stem_hits |>
+  group_by(doc_id) |>
+  summarise(stem_per_1000 = sum(hit) / n() * 1000)
+
+dens_compare <- left_join(dens_total, dens_stem, by = "doc_id")
+as.data.frame(dens_compare)
+cor(dens_compare$material_per_1000, dens_compare$stem_per_1000, method = "spearman")  # ~0.99
+write_csv(dens_compare, "data/density_by_part.csv")
+
+stem_hits |> filter(hit) |> count(lemma_l, sort = TRUE) |>
+  as.data.frame() |> head(60)
+
+# ---- 8c. KWIC check: literal vs. figurative (window idea from Week 3) ----
+# Step 1 (runs once): draw the sample; guarded so it never overwrites your coding.
+focus_rx  <- "^(piedr|polv|ceniz|flor|raíz|raice|tierr|barro|lodo)"
+kwic_file <- "data/kwic_to_code.xlsx"
+
+if (!file.exists(kwic_file)) {
+  kwic_base <- anno_all |>
+    group_by(doc_id) |> mutate(pos = row_number()) |> ungroup()
+
+  hits <- kwic_base |>
+    filter(upos != "PUNCT", str_detect(str_to_lower(lemma), focus_rx),
+           !str_detect(str_to_lower(lemma), "^tierracalent"))
+
+  context_of <- function(d, p, w = 12) {
+    x <- kwic_base |> filter(doc_id == d, pos >= p - w, pos <= p + w)
+    str_c(x$token, collapse = " ")
+  }
+
+  set.seed(570)
+  sample_hits <- hits |>
+    mutate(author = str_sub(doc_id, 1, 3)) |>
+    group_by(author) |>
+    slice_sample(n = 10) |>
+    ungroup() |>
+    mutate(context = map2_chr(doc_id, pos, context_of),
+           use = NA_character_,   # literal / figurative / body / na (= character name)
+           note = NA_character_) |>
+    select(doc_id, token, lemma, context, use, note)
+
+  write_excel_csv(sample_hits, "data/kwic_to_code.csv")  # open in Excel, code `use`,
+  # then save as data/kwic_to_code.xlsx
+}
+
+# Step 2: summarize your hand coding ("na" = not a valid hit, e.g. surname Flores)
+coded <- read_excel(kwic_file) |>
+  mutate(author = str_sub(doc_id, 1, 3),
+         use = str_to_lower(str_trim(use))) |>
+  filter(!is.na(use), use != "na")
+
+nrow(coded)                         # 38 valid hits in the current coding
+count(coded, use)
+coded |> count(author, use) |>
+  pivot_wider(names_from = use, values_from = n, values_fill = 0)
+
+# ---- 9. Synthesis --------------------------------------------
+cross_r <- as.data.frame(r_mat) |>
+  rownames_to_column("doc_i") |>
+  pivot_longer(-doc_i, names_to = "doc_j", values_to = "r") |>
+  filter(str_sub(doc_i, 1, 3) != str_sub(doc_j, 1, 3)) |>
+  group_by(doc_id = doc_i) |>
+  summarise(mean_cross_r = mean(r))
+
+full <- dens_total |>
+  left_join(mls_all, by = "doc_id") |>
+  left_join(cross_r, by = "doc_id")
+
+p1 <- ggplot(full, aes(material_per_1000, mean_cross_r, label = doc_id)) +
+  geom_point() + geom_text_repel(max.overlaps = Inf) + theme_minimal() +
+  labs(x = "Material words per 1,000", y = "Mean Pearson r with other books")
+p2 <- ggplot(full, aes(material_per_1000, MLS, label = doc_id)) +
+  geom_point() + geom_text_repel(max.overlaps = Inf) + theme_minimal() +
+  labs(x = "Material words per 1,000", y = "Mean sentence length (words)")
+p1; p2
+ggsave("figures/density_vs_similarity.png", p1, width = 7, height = 5)
+ggsave("figures/density_vs_MLS.png", p2, width = 7, height = 5)
+
+cor(full$material_per_1000, full$mean_cross_r, method = "spearman")   # about -0.21
+cor(full$material_per_1000, full$MLS, method = "spearman")            # about 0.32
